@@ -198,7 +198,7 @@ func generateRandomSessionID() int32 {
 	return 1 + rand.Int31()
 }
 
-// ExistsSession returns if a session with given ID exists
+// ExistsSession returns if a session with the given ID exists
 func (c *Controller) ExistsSession(id int32) (bool, error) {
 	key := fmt.Sprintf("sessions:%d", id)
 	val, err := c.redisClient.Exists(key).Result()
