@@ -1,25 +1,26 @@
-package sessionmgmt
+package cch
 
 import (
 	"errors"
 	"fmt"
-	"log"
 	"math/rand"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-redis/redis"
+	"github.com/golang/glog"
 	"github.com/gorilla/websocket"
 )
 
-var ErrInvalidRealm = errors.New("sessionmgmt: invalid realm")
-var ErrNoSuchRealm = errors.New("sessionmgmt: realm not found")
-var ErrSessionExistsAlready = errors.New("sessionmgmt: session for realm already exists")
+var errInvalidRealm = errors.New("sessionmgmt: invalid realm")
+var errNoSuchRealm = errors.New("sessionmgmt: realm not found")
+var errSessionExistsAlready = errors.New("sessionmgmt: session for realm already exists")
 
-// Controller handles the websocket client sessions
-type Controller struct {
-	redisClient *redis.Client
+// sessionController handles the websocket client sessions
+type sessionController struct {
+	db *redis.Client
+	// sessions map[string]*session
 }
 
 type clientConfig struct {
@@ -29,15 +30,16 @@ type clientConfig struct {
 	eventsTopic    string
 }
 
-// NewController creates a new session controller instance
-func NewController(redisClient *redis.Client) *Controller {
-	return &Controller{
-		redisClient: redisClient,
+// newSessionController creates a new session controller instance
+func newSessionController(db *redis.Client) *sessionController {
+	return &sessionController{
+		db: db,
+		// sessions:    make(map[string]*session),
 	}
 }
 
-// RegisterSession registers a new websocket session
-func (c *Controller) RegisterSession(conn *websocket.Conn, realm string) (int32, error) {
+// registerSession registers a new websocket session
+func (c *sessionController) registerSession(conn *websocket.Conn, realm string) (int32, error) {
 	cfg, err := c.getClientConfig(realm)
 	if err != nil {
 		return 0, err
@@ -48,7 +50,7 @@ func (c *Controller) RegisterSession(conn *websocket.Conn, realm string) (int32,
 		return 0, err
 	}
 	if exists {
-		return 0, ErrSessionExistsAlready
+		return 0, errSessionExistsAlready
 	}
 
 	sessionID, err := c.createSession(realm, cfg)
@@ -59,10 +61,10 @@ func (c *Controller) RegisterSession(conn *websocket.Conn, realm string) (int32,
 	return sessionID, nil
 }
 
-func (c *Controller) getClientConfig(realm string) (*clientConfig, error) {
+func (c *sessionController) getClientConfig(realm string) (*clientConfig, error) {
 	key := clientKeyFromRealm(realm)
 	if key == "" {
-		return nil, ErrInvalidRealm
+		return nil, errInvalidRealm
 	}
 
 	exists, err := c.existsClientConfig(realm)
@@ -70,17 +72,17 @@ func (c *Controller) getClientConfig(realm string) (*clientConfig, error) {
 		return nil, err
 	}
 	if !exists {
-		return nil, ErrNoSuchRealm
+		return nil, errNoSuchRealm
 	}
 
-	values, err := c.redisClient.HMGet(key, "session_timeout", "ping_interval",
+	values, err := c.db.HMGet(key, "session_timeout", "ping_interval",
 		"pong_max_wait_time", "events_topic").Result()
 	if err != nil {
-		log.Println("getClientConfig error: ", err)
+		glog.Errorln("Failed to get client config:", err)
 		return nil, err
 	}
 
-	log.Println("getClientConfig values: ", values)
+	glog.V(2).Infoln("Client config values: ", values)
 
 	sessionTimeout, err := strconv.Atoi(values[0].(string))
 	if err != nil {
@@ -114,13 +116,13 @@ func clientKeyFromRealm(realm string) string {
 	return ""
 }
 
-func (c *Controller) existsClientConfig(realm string) (bool, error) {
+func (c *sessionController) existsClientConfig(realm string) (bool, error) {
 	key := clientKeyFromRealm(realm)
 	if key == "" {
-		return false, ErrInvalidRealm
+		return false, errInvalidRealm
 	}
 
-	val, err := c.redisClient.Exists(key).Result()
+	val, err := c.db.Exists(key).Result()
 	if err != nil {
 		return false, err
 	}
@@ -128,19 +130,19 @@ func (c *Controller) existsClientConfig(realm string) (bool, error) {
 	return (val == 1), nil
 }
 
-func (c *Controller) existsSessionForRealm(realm string) (bool, error) {
+func (c *sessionController) existsSessionForRealm(realm string) (bool, error) {
 	var cursor uint64
 	for {
 		var keys []string
 		var err error
-		keys, cursor, err = c.redisClient.Scan(cursor, "sessions*", 1000).Result()
+		keys, cursor, err = c.db.Scan(cursor, "sessions*", 1000).Result()
 		if err != nil {
 			return false, err
 		}
 
 		// Fetch each realm field of returend keys
 		for _, key := range keys {
-			val, err := c.redisClient.HGet(key, "realm").Result()
+			val, err := c.db.HGet(key, "realm").Result()
 			if err != nil {
 				return false, err
 			}
@@ -157,13 +159,13 @@ func (c *Controller) existsSessionForRealm(realm string) (bool, error) {
 	return false, nil
 }
 
-func (c *Controller) createSession(realm string, cfg *clientConfig) (int32, error) {
+func (c *sessionController) createSession(realm string, cfg *clientConfig) (int32, error) {
 	for {
 		sessionID := generateRandomSessionID()
 		sessionKey := fmt.Sprintf("sessions:%d", sessionID)
 
 		// HSETNX ensures that the key doesn't exists before it's added
-		success, err := c.redisClient.HSetNX(sessionKey, "realm", realm).Result()
+		success, err := c.db.HSetNX(sessionKey, "realm", realm).Result()
 		if err != nil {
 			return 0, err
 		}
@@ -176,16 +178,16 @@ func (c *Controller) createSession(realm string, cfg *clientConfig) (int32, erro
 			values["connected_since"] = time.Now().Unix()
 
 			// Set all additional fields to the key
-			_, err := c.redisClient.HMSet(sessionKey, values).Result()
+			_, err := c.db.HMSet(sessionKey, values).Result()
 			if err != nil {
-				c.redisClient.Del(sessionKey).Result()
+				c.db.Del(sessionKey).Result()
 				return 0, err
 			}
 
 			// Magic happens here! The key (session) exists only during the
 			// specified session timeout. If the key expires, the session
 			// is dead and the client has to restart the session.
-			c.redisClient.Expire(sessionKey,
+			c.db.Expire(sessionKey,
 				time.Duration(cfg.sessionTimeout)*time.Second)
 
 			return sessionID, nil
@@ -198,10 +200,10 @@ func generateRandomSessionID() int32 {
 	return 1 + rand.Int31()
 }
 
-// ExistsSession returns if a session with the given ID exists
-func (c *Controller) ExistsSession(id int32) (bool, error) {
+// existsSession returns if a session with the given ID exists
+func (c *sessionController) existsSession(id int32) (bool, error) {
 	key := fmt.Sprintf("sessions:%d", id)
-	val, err := c.redisClient.Exists(key).Result()
+	val, err := c.db.Exists(key).Result()
 	if err != nil {
 		return false, err
 	}
