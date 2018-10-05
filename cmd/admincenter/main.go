@@ -2,12 +2,11 @@ package main
 
 import (
 	"flag"
-	"fmt"
-	"log"
 	"net/http"
 
 	"github.com/gorilla/mux"
 
+	log "github.com/Sirupsen/logrus"
 	"github.com/go-redis/redis"
 	"github.com/nsyszr/admincenter/pkg/cch"
 )
@@ -104,7 +103,13 @@ func init() {
 }
 
 func main() {
-	fmt.Println("Starting OAM Control Channel WebSocket Server...")
+	// use JSONFormatter
+	// log.SetFormatter(&logmatic.JSONFormatter{})
+	log.SetLevel(log.DebugLevel)
+
+	log.Info("Starting OAM Control Channel WebSocket Server")
+
+	//fmt.Println("Starting OAM Control Channel WebSocket Server...")
 
 	db := redis.NewClient(&redis.Options{
 		Addr:     "localhost:6379",
@@ -126,5 +131,7 @@ func main() {
 	r := mux.NewRouter()
 	cch.NewServer(db, r)
 
-	log.Fatal(http.ListenAndServeTLS(":9443", "server.crt", "server.key", r))
+	if err := http.ListenAndServeTLS(":9443", "server.crt", "server.key", r); err != nil {
+		log.Error("Failed to start HTTP server:", err)
+	}
 }

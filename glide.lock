@@ -1,5 +1,5 @@
-hash: d03d223107986833f76ee923ce6d27c0cceceea3ce46ecfc6b33b7f2078d6371
-updated: 2018-10-04T22:17:12.155699983+02:00
+hash: 53feb367d466b26df5c6da532d2f8619cc9a280d0d7d64f570cf27434a21b745
+updated: 2018-10-05T19:35:14.567831363+02:00
 imports:
 - name: github.com/go-redis/redis
   version: f3bba01df2026fc865f7782948845db9cf44cf23
@@ -19,4 +19,21 @@ imports:
   version: e3702bed27f0d39777b0b37b664b6280e8ef8fbf
 - name: github.com/gorilla/websocket
   version: 66b9c49e59c6c48f0ffce28c2d8b8a5678502c6d
+- name: github.com/konsorten/go-windows-terminal-sequences
+  version: 5c8c8bd35d3832f5d134ae1e1e375b69a4d25242
+- name: github.com/logmatic/logmatic-go
+  version: dde3c6279e1f50dbc1e351b43fe371f968d75067
+- name: github.com/Sirupsen/logrus
+  version: a67f783a3814b8729bd2dac5780b5f78f8dbd64d
+- name: github.com/sirupsen/logrus
+  version: a67f783a3814b8729bd2dac5780b5f78f8dbd64d
+- name: golang.org/x/crypto
+  version: e3636079e1a4c1f337f212cc5cd2aca108f6c900
+  subpackages:
+  - ssh/terminal
+- name: golang.org/x/sys
+  version: 4497e2df6f9e69048a54498c7affbbec3294ad47
+  subpackages:
+  - unix
+  - windows
 testImports: []

@@ -2,9 +2,10 @@ package cch
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 
-	"github.com/golang/glog"
+	log "github.com/Sirupsen/logrus"
 
 	"github.com/go-redis/redis"
 	"github.com/gorilla/mux"
@@ -19,11 +20,14 @@ const (
 	messageTypePong    int = 5
 )
 
+var errInvalidSession = errors.New("ERR_INVALID_SESSION")
+
 // Server handles the Control Channel WebSocket connections
 type Server struct {
 	db          *redis.Client
 	router      *mux.Router
 	sessionCtrl *sessionController
+	sessions    map[*websocket.Conn]int32
 }
 
 type abortMessageDetails struct {
@@ -46,6 +50,7 @@ func NewServer(db *redis.Client, router *mux.Router) *Server {
 		db:          db,
 		router:      router,
 		sessionCtrl: newSessionController(db),
+		sessions:    make(map[*websocket.Conn]int32),
 	}
 	s.routes()
 	return s
@@ -63,11 +68,11 @@ func (s *Server) handleControlChannel() http.HandlerFunc {
 	}
 
 	return func(w http.ResponseWriter, r *http.Request) {
-		glog.V(2).Info("Handle new incoming connection")
+		log.Info("Handle new incoming connection")
 
 		c, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
-			glog.Errorln("Failed to run websocket upgrade for incoming connection:", err)
+			log.Error("Failed to run websocket upgrade for incoming connection:", err)
 			return
 		}
 		defer c.Close()
@@ -75,15 +80,15 @@ func (s *Server) handleControlChannel() http.HandlerFunc {
 		for {
 			mt, payload, err := c.ReadMessage()
 			if err != nil {
-				glog.Errorln("Failed to read message:", err)
+				log.Error("Failed to read message:", err)
 				return
 			}
 
-			glog.V(2).Infof("Received message: mt=%v, payload=%s\n", mt, payload)
+			log.WithFields(log.Fields{"mt": mt, "payload": string(payload)}).Debug("Received message")
 
 			var message []interface{}
 			if err := json.Unmarshal(payload, &message); err != nil {
-				glog.Errorln("Failed to unmarshal message:", err)
+				log.Error("Failed to unmarshal message:", err)
 				return
 			}
 
@@ -91,39 +96,62 @@ func (s *Server) handleControlChannel() http.HandlerFunc {
 			switch int(messageType) {
 			case messageTypeHello:
 				{
-					glog.V(2).Infoln("Processing HELLO message")
+					log.Debug("Processing HELLO message")
 
-					/*if err := cc.registerSession(c, message); err != nil {
-						writeAbortMessage(c, errTechnicalException, err.Error())
+					if len(message) < 2 || message[1].(string) == "" {
+						writeAbortMessage(c, errInvalidRealm, "No or invalid realm given")
 						return
-					}*/
+					}
+
+					sessionID, err := s.sessionCtrl.registerSession(c, message[1].(string))
+					if err != nil {
+						// TODO: Ensure that we get only errors with valid reason! Eg. tech. exception, etc.
+						writeAbortMessage(c, err, "Add a good error message...")
+						return
+					}
+
+					// Add websocket connection to map with associated session ID
+					s.sessions[c] = sessionID
 
 					if err := writeWelcomeMessage(c, 1234, welcomeMessageDetails{
 						SessionTimeout: 30,
 						PingInterval:   28,
 						PongTimeout:    16,
 						EventsTopic:    "devices::events"}); err != nil {
-						glog.Errorln("Failed to write message:", err)
+						log.Error("Failed to write message:", err)
 						return
 					}
 				}
 				break
 			case messageTypePing:
 				{
-					glog.V(2).Infoln("Processing PING message")
+					log.Debug("Processing PING message")
 
-					/*if !cc.sessionForConnectionExists(c) {
-						log.Println("session for client connection doesn't exists")
-						writeAbortMessage(c, errInvalidSession, "session for client connection doesn't exists")
-						return
-					}*/
-
-					if err := writePongMessage(c, pongMessageDetails{}); err != nil {
-						glog.Errorln("Failed to write message:", err)
+					exists, err := s.sessionCtrl.existsSession(s.sessions[c])
+					if err != nil {
+						// TODO: Ensure that we get only errors with valid reason! Eg. tech. exception, etc.
+						writeAbortMessage(c, err, "Add a good error message...")
 						return
 					}
+
+					if !exists {
+						// TODO: Ensure that we get only errors with valid reason! Eg. tech. exception, etc.
+						writeAbortMessage(c, errInvalidSession, "Add a good error message...")
+						return
+					}
+
+					if err := writePongMessage(c, pongMessageDetails{}); err != nil {
+						log.Error("Failed to write message:", err)
+						return
+					}
+
+					// Update the session, otherwise it expires
+					s.sessionCtrl.updateSession(s.sessions[c], 1, 1)
 				}
 				break
+			default:
+				// TODO: risk!
+				s.sessionCtrl.updateSession(s.sessions[c], 1, 1)
 			}
 		}
 	}
@@ -135,7 +163,7 @@ func writeJSONArrayTextMessage(c *websocket.Conn, msg []interface{}) error {
 		return err
 	}
 
-	glog.V(2).Infof("Writing message: mt=%v, payload=%s\n", websocket.TextMessage, js)
+	log.WithFields(log.Fields{"mt": websocket.TextMessage, "payload": string(js)}).Debug("Sending message")
 
 	err = c.WriteMessage(websocket.TextMessage, js)
 	if err != nil {
@@ -145,10 +173,10 @@ func writeJSONArrayTextMessage(c *websocket.Conn, msg []interface{}) error {
 	return nil
 }
 
-func writeAbortMessage(c *websocket.Conn, reason, details string) error {
+func writeAbortMessage(c *websocket.Conn, reason error, details string) error {
 	var msg []interface{}
 	msg = append(msg, messageTypeAbort)
-	msg = append(msg, reason)
+	msg = append(msg, reason.Error())
 	msg = append(msg, abortMessageDetails{Message: details})
 
 	return writeJSONArrayTextMessage(c, msg)

@@ -8,14 +8,15 @@ import (
 	"strings"
 	"time"
 
+	log "github.com/Sirupsen/logrus"
+
 	"github.com/go-redis/redis"
-	"github.com/golang/glog"
 	"github.com/gorilla/websocket"
 )
 
-var errInvalidRealm = errors.New("sessionmgmt: invalid realm")
-var errNoSuchRealm = errors.New("sessionmgmt: realm not found")
-var errSessionExistsAlready = errors.New("sessionmgmt: session for realm already exists")
+var errInvalidRealm = errors.New("ERR_INVALID_REALM")
+var errNoSuchRealm = errors.New("ERR_NO_SUCH_REALM")
+var errSessionExists = errors.New("ERR_SESSION_EXISTS")
 
 // sessionController handles the websocket client sessions
 type sessionController struct {
@@ -50,7 +51,7 @@ func (c *sessionController) registerSession(conn *websocket.Conn, realm string) 
 		return 0, err
 	}
 	if exists {
-		return 0, errSessionExistsAlready
+		return 0, errSessionExists
 	}
 
 	sessionID, err := c.createSession(realm, cfg)
@@ -78,11 +79,11 @@ func (c *sessionController) getClientConfig(realm string) (*clientConfig, error)
 	values, err := c.db.HMGet(key, "session_timeout", "ping_interval",
 		"pong_max_wait_time", "events_topic").Result()
 	if err != nil {
-		glog.Errorln("Failed to get client config:", err)
+		log.Error("Failed to get client config:", err)
 		return nil, err
 	}
 
-	glog.V(2).Infoln("Client config values: ", values)
+	log.Debug("Client config values:", values)
 
 	sessionTimeout, err := strconv.Atoi(values[0].(string))
 	if err != nil {
@@ -175,7 +176,10 @@ func (c *sessionController) createSession(realm string, cfg *clientConfig) (int3
 			var values map[string]interface{}
 			values = make(map[string]interface{})
 			values["realm"] = realm
+			values["session_timeout"] = cfg.sessionTimeout
 			values["connected_since"] = time.Now().Unix()
+			values["msgs_send"] = 1
+			values["msgs_rcvd"] = 1
 
 			// Set all additional fields to the key
 			_, err := c.db.HMSet(sessionKey, values).Result()
@@ -209,4 +213,33 @@ func (c *sessionController) existsSession(id int32) (bool, error) {
 	}
 
 	return (val == 1), nil
+}
+
+func (c *sessionController) updateSession(sessionID int32, incrMsgsSendBy, incrMsgsRcvdBy int64) error {
+	sessionKey := fmt.Sprintf("sessions:%d", sessionID)
+
+	// Fetch session timeout
+	s, err := c.db.HGet(sessionKey, "session_timeout").Result()
+	if err != nil {
+		return err
+	}
+	sessionTimeout, err := strconv.Atoi(s)
+	if err != nil {
+		return err
+	}
+
+	// Increment the message counters
+	_, err = c.db.HIncrBy(sessionKey, "msgs_send", incrMsgsSendBy).Result()
+	if err != nil {
+		return err
+	}
+	_, err = c.db.HIncrBy(sessionKey, "msgs_rcvd", incrMsgsRcvdBy).Result()
+	if err != nil {
+		return err
+	}
+
+	// Reset expire time
+	c.db.Expire(sessionKey, time.Duration(sessionTimeout)*time.Second)
+
+	return nil
 }
