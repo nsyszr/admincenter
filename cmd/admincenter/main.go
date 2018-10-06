@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
+	"github.com/streadway/amqp"
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/go-redis/redis"
@@ -103,14 +104,12 @@ func init() {
 }
 
 func main() {
-	// use JSONFormatter
 	// log.SetFormatter(&logmatic.JSONFormatter{})
 	log.SetLevel(log.DebugLevel)
 
 	log.Info("Starting OAM Control Channel WebSocket Server")
 
-	//fmt.Println("Starting OAM Control Channel WebSocket Server...")
-
+	// Setup connection to Redis
 	db := redis.NewClient(&redis.Options{
 		Addr:     "localhost:6379",
 		Password: "", // no password set
@@ -118,19 +117,23 @@ func main() {
 	})
 	defer db.Close()
 
-	/*ctrl := sessionmgmt.NewController(redisClient)
-
-	r := http.NewServeMux()
-
-	cc := controlChannel{
-		sessions:    make(map[string]*session),
-		sessionCtrl: ctrl,
+	// Setup connection to AMQP
+	amqpConn, err := amqp.Dial("amqp://guest:guest@localhost:5672/")
+	if err != nil {
+		log.Error("Failed to connect to AMQP:", err)
+		return
 	}
-	r.HandleFunc("/control", cc.handleClientConnection)*/
+	defer amqpConn.Close()
 
+	// Create new control channel server
 	r := mux.NewRouter()
-	cch.NewServer(db, r)
+	_, err = cch.NewServer(db, amqpConn, r)
+	if err != nil {
+		log.Error("Failed to create new control channel server:", err)
+		return
+	}
 
+	// Start server
 	if err := http.ListenAndServeTLS(":9443", "server.crt", "server.key", r); err != nil {
 		log.Error("Failed to start HTTP server:", err)
 	}

@@ -1,5 +1,5 @@
-hash: 53feb367d466b26df5c6da532d2f8619cc9a280d0d7d64f570cf27434a21b745
-updated: 2018-10-05T19:35:14.567831363+02:00
+hash: ccf9917d8043aae7060345b627a688ff5b6ac493a680ed2239afb6547ace709c
+updated: 2018-10-06T10:43:03.681031088+02:00
 imports:
 - name: github.com/go-redis/redis
   version: f3bba01df2026fc865f7782948845db9cf44cf23
@@ -23,10 +23,12 @@ imports:
   version: 5c8c8bd35d3832f5d134ae1e1e375b69a4d25242
 - name: github.com/logmatic/logmatic-go
   version: dde3c6279e1f50dbc1e351b43fe371f968d75067
-- name: github.com/Sirupsen/logrus
-  version: a67f783a3814b8729bd2dac5780b5f78f8dbd64d
 - name: github.com/sirupsen/logrus
   version: a67f783a3814b8729bd2dac5780b5f78f8dbd64d
+- name: github.com/Sirupsen/logrus
+  version: a67f783a3814b8729bd2dac5780b5f78f8dbd64d
+- name: github.com/streadway/amqp
+  version: 70e15c650864f4fc47f5d3c82ea117285480895d
 - name: golang.org/x/crypto
   version: e3636079e1a4c1f337f212cc5cd2aca108f6c900
   subpackages:
