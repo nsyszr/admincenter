@@ -14,3 +14,5 @@ import:
 - package: github.com/Sirupsen/logrus
   version: ~1.1.0
 - package: github.com/streadway/amqp
+- package: gopkg.in/yaml.v2
+  version: ~2.2.1
