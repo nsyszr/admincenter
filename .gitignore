@@ -18,3 +18,6 @@ export_presets.cfg
 
 # Mono-specific ignores
 .mono/
+
+# Glide pkg
+vendor/

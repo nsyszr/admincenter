@@ -1,5 +1,5 @@
-hash: f69fbd33413e2b1ff4ab87f38c91373f1ac7d2f6373675c0ca2d42fab275b0f4
-updated: 2018-10-06T20:39:06.569213831+02:00
+hash: f79370dbe76dacfb514c182fc51142c8d6c504f2682eee012a70255af2239729
+updated: 2018-10-07T17:30:15.022227+02:00
 imports:
 - name: github.com/go-redis/redis
   version: f3bba01df2026fc865f7782948845db9cf44cf23
@@ -11,8 +11,6 @@ imports:
   - internal/proto
   - internal/singleflight
   - internal/util
-- name: github.com/golang/glog
-  version: 23def4e6c14b4da8ac2ed8007337bc5eb5007998
 - name: github.com/gorilla/context
   version: 08b5f424b9271eedf6f9f0ce86cb9396ed337a42
 - name: github.com/gorilla/mux
@@ -21,10 +19,6 @@ imports:
   version: 66b9c49e59c6c48f0ffce28c2d8b8a5678502c6d
 - name: github.com/konsorten/go-windows-terminal-sequences
   version: 5c8c8bd35d3832f5d134ae1e1e375b69a4d25242
-- name: github.com/logmatic/logmatic-go
-  version: dde3c6279e1f50dbc1e351b43fe371f968d75067
-- name: github.com/sirupsen/logrus
-  version: a67f783a3814b8729bd2dac5780b5f78f8dbd64d
 - name: github.com/Sirupsen/logrus
   version: a67f783a3814b8729bd2dac5780b5f78f8dbd64d
 - name: github.com/streadway/amqp
