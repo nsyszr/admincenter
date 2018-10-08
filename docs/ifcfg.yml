@@ -1,0 +1,5 @@
+interfaces:
+  - name: 1.1
+    active: true
+    networks:
+      - name: net1

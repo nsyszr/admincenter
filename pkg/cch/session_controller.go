@@ -76,24 +76,24 @@ func (c *sessionController) getClientConfig(realm string) (*clientConfig, error)
 		return nil, errNoSuchRealm
 	}
 
-	values, err := c.db.HMGet(key, "session_timeout", "ping_interval",
+	res, err := c.db.HMGet(key, "session_timeout", "ping_interval",
 		"pong_max_wait_time", "events_topic").Result()
 	if err != nil {
 		log.Error("Failed to get client config:", err)
 		return nil, err
 	}
 
-	log.Debug("Client config values:", values)
+	log.Debug("Client config values:", res)
 
-	sessionTimeout, err := strconv.Atoi(values[0].(string))
+	sessionTimeout, err := strconv.Atoi(res[0].(string))
 	if err != nil {
 		return nil, err
 	}
-	pingInterval, err := strconv.Atoi(values[1].(string))
+	pingInterval, err := strconv.Atoi(res[1].(string))
 	if err != nil {
 		return nil, err
 	}
-	pongTimeout, err := strconv.Atoi(values[2].(string))
+	pongTimeout, err := strconv.Atoi(res[2].(string))
 	if err != nil {
 		return nil, err
 	}
@@ -102,7 +102,7 @@ func (c *sessionController) getClientConfig(realm string) (*clientConfig, error)
 		sessionTimeout: sessionTimeout,
 		pingInterval:   pingInterval,
 		pongTimeout:    pongTimeout,
-		eventsTopic:    values[3].(string),
+		eventsTopic:    res[3].(string),
 	}
 
 	return cfg, nil
@@ -123,12 +123,12 @@ func (c *sessionController) existsClientConfig(realm string) (bool, error) {
 		return false, errInvalidRealm
 	}
 
-	val, err := c.db.Exists(key).Result()
+	res, err := c.db.Exists(key).Result()
 	if err != nil {
 		return false, err
 	}
 
-	return (val == 1), nil
+	return (res == 1), nil
 }
 
 func (c *sessionController) existsSessionForRealm(realm string) (bool, error) {
@@ -143,11 +143,11 @@ func (c *sessionController) existsSessionForRealm(realm string) (bool, error) {
 
 		// Fetch each realm field of returend keys
 		for _, key := range keys {
-			val, err := c.db.HGet(key, "realm").Result()
+			res, err := c.db.HGet(key, "realm").Result()
 			if err != nil {
 				return false, err
 			}
-			if val == realm {
+			if res == realm {
 				return true, nil
 			}
 		}
@@ -173,16 +173,15 @@ func (c *sessionController) createSession(realm string, cfg *clientConfig) (int3
 
 		// We're added a new unique session key
 		if success {
-			var values map[string]interface{}
-			values = make(map[string]interface{})
-			values["realm"] = realm
-			values["session_timeout"] = cfg.sessionTimeout
-			values["connected_since"] = time.Now().Unix()
-			values["msgs_send"] = 1
-			values["msgs_rcvd"] = 1
+			fields := make(map[string]interface{})
+			fields["realm"] = realm
+			fields["session_timeout"] = cfg.sessionTimeout
+			fields["connected_since"] = time.Now().Unix()
+			fields["msgs_send"] = 1
+			fields["msgs_rcvd"] = 1
 
 			// Set all additional fields to the key
-			_, err := c.db.HMSet(sessionKey, values).Result()
+			_, err := c.db.HMSet(sessionKey, fields).Result()
 			if err != nil {
 				c.db.Del(sessionKey).Result()
 				return 0, err
@@ -207,12 +206,12 @@ func generateRandomSessionID() int32 {
 // existsSession returns if a session with the given ID exists
 func (c *sessionController) existsSession(id int32) (bool, error) {
 	key := fmt.Sprintf("sessions:%d", id)
-	val, err := c.db.Exists(key).Result()
+	res, err := c.db.Exists(key).Result()
 	if err != nil {
 		return false, err
 	}
 
-	return (val == 1), nil
+	return (res == 1), nil
 }
 
 func (c *sessionController) updateSession(sessionID int32, incrMsgsSendBy, incrMsgsRcvdBy int64) error {

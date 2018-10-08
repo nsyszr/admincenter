@@ -35,7 +35,7 @@ type Server struct {
 	db           *redis.Client
 	ch           *amqp.Channel
 	router       *mux.Router
-	sessionCtrl  *sessionController
+	sessCtrl     *sessionController
 	sessions     map[*websocket.Conn]int32
 	rpcQueueName string
 }
@@ -73,11 +73,11 @@ func NewServer(db *redis.Client, amqpConn *amqp.Connection, router *mux.Router) 
 	}
 
 	s := &Server{
-		db:          db,
-		ch:          ch,
-		router:      router,
-		sessionCtrl: newSessionController(db),
-		sessions:    make(map[*websocket.Conn]int32),
+		db:       db,
+		ch:       ch,
+		router:   router,
+		sessCtrl: newSessionController(db),
+		sessions: make(map[*websocket.Conn]int32),
 	}
 
 	s.configureRoutes()
@@ -90,24 +90,18 @@ func (s *Server) configureRoutes() {
 }
 
 func (s *Server) handleControlChannel() http.HandlerFunc {
-	var upgrader = websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool {
-			return true
-		},
-	}
-
 	return func(w http.ResponseWriter, r *http.Request) {
-		log.Debug("New control channel connection opened")
+		log.Debug("Enter handleControlChannel()")
 
-		c, err := upgrader.Upgrade(w, r, nil)
+		sess, err := newSession(s.sessCtrl, w, r, nil)
 		if err != nil {
-			log.Error("Failed to run websocket upgrade for incoming connection:", err)
+			log.Error("Failed to start control channel session:", err)
 			return
 		}
-		defer c.Close()
+		defer sess.close()
 
 		for {
-			mt, payload, err := c.ReadMessage()
+			mt, payload, err := sess.conn.ReadMessage()
 			if err != nil {
 				log.Error("Failed to read message:", err)
 				return
@@ -126,21 +120,21 @@ func (s *Server) handleControlChannel() http.HandlerFunc {
 			case messageTypeHello:
 				{
 					if len(message) < 2 || message[1].(string) == "" {
-						writeAbortMessage(c, errInvalidRealm, "No or invalid realm given")
+						writeAbortMessage(sess.conn, errInvalidRealm, "No or invalid realm given")
 						return
 					}
 
-					sessionID, err := s.sessionCtrl.registerSession(c, message[1].(string))
+					sessionID, err := s.sessCtrl.registerSession(sess.conn, message[1].(string))
 					if err != nil {
 						// TODO: Ensure that we get only errors with valid reason! Eg. tech. exception, etc.
-						writeAbortMessage(c, err, "Add a good error message...")
+						writeAbortMessage(sess.conn, err, "Add a good error message...")
 						return
 					}
 
 					// Add websocket connection to map with associated session ID
-					s.sessions[c] = sessionID
+					s.sessions[sess.conn] = sessionID
 
-					if err := writeWelcomeMessage(c, 1234, welcomeMessageDetails{
+					if err := writeWelcomeMessage(sess.conn, 1234, welcomeMessageDetails{
 						SessionTimeout: 30,
 						PingInterval:   28,
 						PongTimeout:    16,
@@ -152,26 +146,26 @@ func (s *Server) handleControlChannel() http.HandlerFunc {
 				break
 			case messageTypePing, messageTypePublish:
 				{
-					exists, err := s.sessionCtrl.existsSession(s.sessions[c])
+					exists, err := s.sessCtrl.existsSession(s.sessions[sess.conn])
 					if err != nil {
 						// TODO: Ensure that we get only errors with valid reason! Eg. tech. exception, etc.
-						writeAbortMessage(c, err, "Add a good error message...")
+						writeAbortMessage(sess.conn, err, "Add a good error message...")
 						return
 					}
 
 					if !exists {
 						// TODO: Ensure that we get only errors with valid reason! Eg. tech. exception, etc.
-						writeAbortMessage(c, errInvalidSession, "Add a good error message...")
+						writeAbortMessage(sess.conn, errInvalidSession, "Add a good error message...")
 						return
 					}
 
-					if err := s.handleIncomingMessage(c, message); err != nil {
+					if err := s.handleIncomingMessage(sess.conn, message); err != nil {
 						log.Error("Failed to handle incoming message:", err)
 						return
 					}
 
 					// Update the session, otherwise it expires
-					s.sessionCtrl.updateSession(s.sessions[c], 1, 1)
+					s.sessCtrl.updateSession(s.sessions[sess.conn], 1, 1)
 				}
 				break
 			default:
