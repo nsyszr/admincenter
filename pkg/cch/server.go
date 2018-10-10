@@ -36,7 +36,6 @@ type Server struct {
 	ch           *amqp.Channel
 	router       *mux.Router
 	sessCtrl     *sessionController
-	sessions     map[*websocket.Conn]int32
 	rpcQueueName string
 }
 
@@ -77,7 +76,6 @@ func NewServer(db *redis.Client, amqpConn *amqp.Connection, router *mux.Router) 
 		ch:       ch,
 		router:   router,
 		sessCtrl: newSessionController(db),
-		sessions: make(map[*websocket.Conn]int32),
 	}
 
 	s.configureRoutes()
@@ -93,131 +91,16 @@ func (s *Server) handleControlChannel() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		log.Debug("Enter handleControlChannel()")
 
-		sess, err := newSession(s.sessCtrl, w, r, nil)
+		/*sess, err := newSession(s.sessCtrl, w, r, nil)
 		if err != nil {
 			log.Error("Failed to start control channel session:", err)
 			return
 		}
 		defer sess.close()
 
-		for {
-			mt, payload, err := sess.conn.ReadMessage()
-			if err != nil {
-				log.Error("Failed to read message:", err)
-				return
-			}
-
-			log.WithFields(log.Fields{"mt": mt, "payload": string(payload)}).Debug("Received message")
-
-			var message []interface{}
-			if err := json.Unmarshal(payload, &message); err != nil {
-				log.Error("Failed to unmarshal message:", err)
-				return
-			}
-
-			messageType := message[0].(float64)
-			switch int(messageType) {
-			case messageTypeHello:
-				{
-					if len(message) < 2 || message[1].(string) == "" {
-						writeAbortMessage(sess.conn, errInvalidRealm, "No or invalid realm given")
-						return
-					}
-
-					sessionID, err := s.sessCtrl.registerSession(sess.conn, message[1].(string))
-					if err != nil {
-						// TODO: Ensure that we get only errors with valid reason! Eg. tech. exception, etc.
-						writeAbortMessage(sess.conn, err, "Add a good error message...")
-						return
-					}
-
-					// Add websocket connection to map with associated session ID
-					s.sessions[sess.conn] = sessionID
-
-					if err := writeWelcomeMessage(sess.conn, 1234, welcomeMessageDetails{
-						SessionTimeout: 30,
-						PingInterval:   28,
-						PongTimeout:    16,
-						EventsTopic:    "devices::events"}); err != nil {
-						log.Error("Failed to write message:", err)
-						return
-					}
-				}
-				break
-			case messageTypePing, messageTypePublish:
-				{
-					exists, err := s.sessCtrl.existsSession(s.sessions[sess.conn])
-					if err != nil {
-						// TODO: Ensure that we get only errors with valid reason! Eg. tech. exception, etc.
-						writeAbortMessage(sess.conn, err, "Add a good error message...")
-						return
-					}
-
-					if !exists {
-						// TODO: Ensure that we get only errors with valid reason! Eg. tech. exception, etc.
-						writeAbortMessage(sess.conn, errInvalidSession, "Add a good error message...")
-						return
-					}
-
-					if err := s.handleIncomingMessage(sess.conn, message); err != nil {
-						log.Error("Failed to handle incoming message:", err)
-						return
-					}
-
-					// Update the session, otherwise it expires
-					s.sessCtrl.updateSession(s.sessions[sess.conn], 1, 1)
-				}
-				break
-			default:
-				{
-
-				}
-				break
-			}
-		}
+		sess.listenAndServe()*/
+		s.sessCtrl.handleSession(w, r)
 	}
-}
-
-func (s *Server) handleIncomingMessage(c *websocket.Conn, message []interface{}) error {
-	messageType := int(message[0].(float64))
-	switch messageType {
-	case messageTypePing:
-		{
-			if err := writePongMessage(c, pongMessageDetails{}); err != nil {
-				return err
-			}
-		}
-		break
-	case messageTypePublish:
-		{
-			requestID := int(message[1].(float64))
-			topic := message[2].(string)
-			//args := message[3].(publishMessageDetails)
-			//log.Debug("args=", args)
-
-			body, err := json.Marshal(message[3])
-			if err != nil {
-				log.Error("Failed to marshal body:", err)
-				return err
-			}
-			log.Debug("body=", string(body))
-
-			publicationID, err := s.publishMessageToAMQP(topic, string(body))
-			if err != nil {
-				writeErrorMessage(c, messageType, requestID,
-					"ERR_UNKNOWN_EXCEPTION", errorMessageDetails{Error: err.Error()})
-
-				// TODO: check if this okay? How to handle such errors in future?
-				return nil
-			}
-
-			if err := writePublishedMessage(c, requestID, publicationID); err != nil {
-				return err
-			}
-		}
-	}
-
-	return nil
 }
 
 func writeJSONArrayTextMessage(c *websocket.Conn, msg []interface{}) error {

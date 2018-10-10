@@ -1,5 +1,5 @@
-hash: f79370dbe76dacfb514c182fc51142c8d6c504f2682eee012a70255af2239729
-updated: 2018-10-07T17:30:15.022227+02:00
+hash: 066ccb975b3b99ada7d1752226d210603a752f5a4864cd93bcae3f8cfb43c077
+updated: 2018-10-10T19:48:30.993982161+02:00
 imports:
 - name: github.com/go-redis/redis
   version: f3bba01df2026fc865f7782948845db9cf44cf23
@@ -11,6 +11,18 @@ imports:
   - internal/proto
   - internal/singleflight
   - internal/util
+- name: github.com/gobwas/httphead
+  version: 2c6c146eadee0b69f856f87e3e9f1d0cd6aad2f5
+- name: github.com/gobwas/pool
+  version: fa3125c39d7eca32e1387bb69b1b38dcb31b1e0b
+  subpackages:
+  - internal/pmath
+  - pbufio
+  - pbytes
+- name: github.com/gobwas/ws
+  version: 469ccd6afe52b489eee1e662098562dd7d77a4f8
+  subpackages:
+  - wsutil
 - name: github.com/gorilla/context
   version: 08b5f424b9271eedf6f9f0ce86cb9396ed337a42
 - name: github.com/gorilla/mux
@@ -20,7 +32,7 @@ imports:
 - name: github.com/konsorten/go-windows-terminal-sequences
   version: 5c8c8bd35d3832f5d134ae1e1e375b69a4d25242
 - name: github.com/Sirupsen/logrus
-  version: a67f783a3814b8729bd2dac5780b5f78f8dbd64d
+  version: ad15b42461921f1fb3529b058c6786c6a45d5162
 - name: github.com/streadway/amqp
   version: 70e15c650864f4fc47f5d3c82ea117285480895d
 - name: golang.org/x/crypto
