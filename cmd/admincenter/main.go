@@ -9,7 +9,7 @@ import (
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/go-redis/redis"
-	"github.com/nsyszr/admincenter/pkg/cch"
+	"github.com/nsyszr/admincenter/pkg/controlchannel"
 )
 
 func init() {
@@ -43,7 +43,7 @@ func main() {
 
 	// Create new control channel server
 	r := mux.NewRouter()
-	_, err = cch.NewServer(db, amqpConn, r)
+	_, err = controlchannel.NewServer(db, amqpConn, r)
 	if err != nil {
 		log.Error("Failed to create new control channel server:", err)
 		return

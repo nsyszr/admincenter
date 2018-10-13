@@ -1,4 +1,4 @@
-package cch
+package controlchannel
 
 import (
 	"fmt"

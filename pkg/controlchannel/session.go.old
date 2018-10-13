@@ -1,14 +1,11 @@
-package cch
+package controlchannel
 
 import (
 	"encoding/json"
 	"net"
-	"net/http"
 	"time"
 
 	log "github.com/Sirupsen/logrus"
-	"github.com/gobwas/ws"
-	"github.com/gobwas/ws/wsutil"
 	"github.com/gorilla/websocket"
 )
 
@@ -18,104 +15,24 @@ type session struct {
 	ctrl         *sessionController
 	startedAt    time.Time
 	registeredCh chan bool
+	quitCh       chan bool
+	nextFrameCh  chan bool
 	registered   bool
 }
 
-func newSession(ctrl *sessionController, w http.ResponseWriter,
-	r *http.Request, responseHeader http.Header) (*session, error) {
-	/*var upgrader = websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool {
-			return true
-		},
-	}
-
-	conn, err := upgrader.Upgrade(w, r, responseHeader)
-	if err != nil {
-		return nil, err
-	}*/
-	conn, _, _, err := ws.UpgradeHTTP(r, w)
-	if err != nil {
-		log.WithFields(log.Fields{"remoteAddr": conn.RemoteAddr()}).
-			Error("Failed to upgrade HTTP websocket:", err)
-		return nil, err
-	}
-
-	// TODO: Create a unique session ID, even if the session is not registered.
-	//       This is interessting for Prometheus statistics! Add expires at
-	//       to the session Redis key. If the session wont be registered, it
-	//       disappears from the Prometheus statistics.
-	// NOTES: Rethink that idea! Create seperate stats for initiated connections,
-	//        for dropped onces, etc. A session should be only established
-	//		  if both parties agree to each other.
-
-	sess := &session{
+func newSession(conn net.Conn, ctrl *sessionController) *session {
+	return &session{
 		conn:         conn,
 		ctrl:         ctrl,
 		startedAt:    time.Now(),
-		registeredCh: make(chan bool, 1),
+		registeredCh: make(chan bool),
+		nextFrameCh:  make(chan bool),
+		quitCh:       make(chan bool),
 	}
-
-	log.WithFields(log.Fields{"remoteAddr": conn.RemoteAddr()}).
-		Info("Control channel session started")
-
-	// Start a background timer to invalidate session if not registered within
-	// a specified time period.
-	go func(sess *session) {
-		log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr()}).
-			Debug("Registration timeout routine started")
-		for {
-			select {
-			case <-sess.registeredCh:
-				log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr()}).
-					Debug("Registration timeout routine stopped")
-				return
-			case <-time.After(60 * time.Second): // TODO: get timeout from config
-				log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr()}).
-					Debug("Registration timeout routine expired")
-				return
-			}
-		}
-	}(sess)
-
-	// Start the websocket session
-	go func() {
-		defer conn.Close()
-
-		var (
-			r       = wsutil.NewReader(conn, ws.StateServerSide)
-			w       = wsutil.NewWriter(conn, ws.StateServerSide, ws.OpText)
-			decoder = json.NewDecoder(r)
-			//encoder = json.NewEncoder(w)
-		)
-		for {
-			if _, err = r.NextFrame(); err != nil {
-				log.WithFields(log.Fields{"remoteAddr": conn.RemoteAddr()}).
-					Error("Failed to read the next frame:", err)
-				return
-			}
-
-			var req []interface{}
-			if err := decoder.Decode(&req); err != nil {
-				log.WithFields(log.Fields{"remoteAddr": conn.RemoteAddr()}).
-					Error("Failed to decode request:", err)
-				return
-			}
-
-			if err = w.Flush(); err != nil {
-				log.WithFields(log.Fields{"remoteAddr": conn.RemoteAddr()}).
-					Error("Failed to flush response:", err)
-				return
-			}
-		}
-	}()
-
-	return sess, nil
 }
 
 func (sess *session) close() {
-	// Ensure the registration timeout routine is stopped.
-	// TODO: Not the nicest way, b/c the session seems to be a valid and registered maybe we should a drop or similar channel!
-	sess.registeredCh <- true
+	sess.ctrl.unregisterSession(sess)
 
 	if sess.conn != nil {
 		sess.conn.Close()
@@ -123,6 +40,43 @@ func (sess *session) close() {
 
 	log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr()}).
 		Info("Control channel session closed")
+}
+
+func (sess *session) handleRequest(req []interface{}, encoder *json.Encoder) error {
+	messageType := int(req[0].(float64))
+	switch messageType {
+	case messageTypeHello:
+		{
+			if len(req) < 2 || req[1].(string) == "" {
+				writeAbortMessage(encoder, errInvalidRealm, "No or invalid realm given")
+				return errInvalidRealm
+			}
+
+			_, err := sess.ctrl.registerSession(req[1].(string))
+			if err != nil {
+				// TODO: Ensure that we get only errors with valid reason! Eg. tech. exception, etc.
+				writeAbortMessage(encoder, err, "Add a good error message...")
+				return err
+			}
+
+			// Add websocket connection to map with associated session ID
+			//sess.ctrl.sessions[sess.conn] = sessionID
+
+			if err := writeWelcomeMessage(encoder, 1234, welcomeMessageDetails{
+				SessionTimeout: 30,
+				PingInterval:   28,
+				PongTimeout:    16,
+				EventsTopic:    "devices::events"}); err != nil {
+				log.Error("Failed to write message:", err)
+				return err
+			}
+
+			// Quit the registration timeout routine
+			sess.register()
+		}
+		break
+	}
+	return nil
 }
 
 func (sess *session) listenAndServe() {
@@ -252,4 +206,56 @@ func (sess *session) handleIncomingMessage(c *websocket.Conn, message []interfac
 func (sess *session) register() {
 	sess.registered = true
 	sess.registeredCh <- true
+}
+
+func writeAbortMessage(encoder *json.Encoder, reason error, details string) error {
+	var msg []interface{}
+	msg = append(msg, messageTypeAbort)
+	msg = append(msg, reason.Error())
+	msg = append(msg, abortMessageDetails{Message: details})
+
+	log.WithFields(log.Fields{"msg": msg}).Debug("Sending abort message")
+
+	return encoder.Encode(msg)
+}
+
+func writeWelcomeMessage(encoder *json.Encoder, sessionID int, details interface{}) error {
+	var msg []interface{}
+	msg = append(msg, messageTypeWelcome)
+	msg = append(msg, sessionID)
+	msg = append(msg, details)
+
+	log.WithFields(log.Fields{"msg": msg}).Debug("Sending welcome message")
+	return encoder.Encode(msg)
+}
+
+func writePongMessage(encoder *json.Encoder, details interface{}) error {
+	var msg []interface{}
+	msg = append(msg, messageTypePong)
+	msg = append(msg, details)
+
+	log.WithFields(log.Fields{"msg": msg}).Debug("Sending pong message")
+	return encoder.Encode(msg)
+}
+
+func writeErrorMessage(encoder *json.Encoder, messageType, requestID int, err string, details interface{}) error {
+	var msg []interface{}
+	msg = append(msg, messageTypeError)
+	msg = append(msg, messageType)
+	msg = append(msg, requestID)
+	msg = append(msg, err)
+	msg = append(msg, details)
+
+	log.WithFields(log.Fields{"msg": msg}).Debug("Sending error message")
+	return encoder.Encode(msg)
+}
+
+func writePublishedMessage(encoder *json.Encoder, requestID, publicationID int) error {
+	var msg []interface{}
+	msg = append(msg, messageTypePublished)
+	msg = append(msg, requestID)
+	msg = append(msg, publicationID)
+
+	log.WithFields(log.Fields{"msg": msg}).Debug("Sending published message")
+	return encoder.Encode(msg)
 }
