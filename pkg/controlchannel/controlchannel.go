@@ -15,6 +15,7 @@ import (
 	"github.com/go-redis/redis"
 	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
+	"github.com/streadway/amqp"
 )
 
 const (
@@ -35,6 +36,7 @@ var errInvalidSession = errors.New("ERR_INVALID_SESSION")
 var errNoSuchRealm = errors.New("ERR_NO_SUCH_REALM")
 var errSessionExists = errors.New("ERR_SESSION_EXISTS")
 var errProtocolViolation = errors.New("ERR_PROTOCOL_VIOLATION")
+var errPublishFailed = errors.New("ERR_PUBLISH_FAILED")
 
 // Session contains logic for a control channel session
 type Session struct {
@@ -53,6 +55,7 @@ type Controller struct {
 	redisDB  *redis.Client
 	mu       sync.RWMutex
 	sessions map[string]*Session
+	ch       *amqp.Channel
 }
 
 type clientConfig struct {
@@ -60,6 +63,13 @@ type clientConfig struct {
 	pingInterval   int
 	pongTimeout    int
 	eventsTopic    string
+}
+
+type publishMessage struct {
+	messageType int
+	requestID   int
+	topic       string
+	body        []byte
 }
 
 // NewSession returns an instance of control channel session
@@ -74,16 +84,24 @@ func NewSession(conn net.Conn, ctrl *Controller) *Session {
 }
 
 // NewController returns an instance of control channel controller
-func NewController(redisDB *redis.Client) *Controller {
+func NewController(redisDB *redis.Client, amqpConn *amqp.Connection) (*Controller, error) {
+	// Setup a AMQP channel
+	ch, err := amqpConn.Channel()
+	if err != nil {
+		return nil, err
+	}
+
+	// Create new controller
 	ctrl := &Controller{
 		redisDB:  redisDB,
 		sessions: make(map[string]*Session), // Key is realm
+		ch:       ch,
 	}
 
 	// Remove existing session entries
 	ctrl.cleanupSessions()
 
-	return ctrl
+	return ctrl, nil
 }
 
 // Close sends a quit signal and closes the network connection
@@ -141,7 +159,8 @@ func (sess *Session) listen() error {
 		log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr()}).
 			Debug("Wait for the next frame")
 
-		if _, err := r.NextFrame(); err != nil {
+		hdr, err := r.NextFrame()
+		if err != nil {
 			log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr()}).
 				Error("Failed to read the next frame:", err)
 			return err
@@ -154,7 +173,7 @@ func (sess *Session) listen() error {
 			return err
 		}
 
-		log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr()}).
+		log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr(), "length": hdr.Length}).
 			Debugf("Received request: %v", req)
 
 		if err := sess.handleRequest(req, encoder); err != nil {
@@ -171,18 +190,52 @@ func (sess *Session) listen() error {
 	}
 }
 
+// AnyToFloat64 returns a float64 for given empty interface
+func AnyToFloat64(v interface{}) (float64, error) {
+	switch v.(type) {
+	case float64:
+		return v.(float64), nil
+	default:
+		return 0, fmt.Errorf("Type conversion failed")
+	}
+}
+
+// AnyToString returns a string for given empty interface
+func AnyToString(v interface{}) (string, error) {
+	switch v.(type) {
+	case string:
+		return v.(string), nil
+	default:
+		return "", fmt.Errorf("Type conversion failed")
+	}
+}
+
+// AnyToJSON returns a JSON byte array
+func AnyToJSON(v interface{}) ([]byte, error) {
+	js, err := json.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("Type conversion failed")
+	}
+	return js, nil
+}
+
 func (sess *Session) handleRequest(req []interface{}, resp *json.Encoder) error {
 	if len(req) == 0 {
 		return fmt.Errorf("empty message")
 	}
 
 	var messageType int
-	switch req[0].(type) {
+	/*switch req[0].(type) {
 	case float64:
 		messageType = int(req[0].(float64))
 	default:
 		return fmt.Errorf("invalid message type")
+	}*/
+	v, err := AnyToFloat64(req[0])
+	if err != nil {
+		return err
 	}
+	messageType = int(v)
 
 	// We only accept hello message until the session isn't registered
 	if messageType == messageTypeHello {
@@ -202,7 +255,10 @@ func (sess *Session) handleRequest(req []interface{}, resp *json.Encoder) error 
 		return sess.abort(resp, errProtocolViolation, "After registration a new welcome message is not allowed.")
 	case messageTypePing:
 		return sess.handlePingMessage(req, resp)
+	case messageTypePublish:
+		return sess.handlePublishMessage(req, resp)
 	}
+
 	return nil
 }
 
@@ -241,30 +297,105 @@ func (sess *Session) abort(resp *json.Encoder, err error, details string) error 
 	sess.Close()
 	return nil
 }
-
-func (sess *Session) handlePingMessage(req []interface{}, resp *json.Encoder) error {
-	log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr(), "realm": sess.realm}).
-		Debug("Handle ping message")
-
+func (sess *Session) ensureRegistered(resp *json.Encoder) (bool, error) {
 	ok, err := sess.ctrl.existsSession(sess.id)
 	if err != nil {
 		log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr(), "realm": sess.realm}).
 			Error("Failed to check if session exists:", err)
-		return err
+		return false, err
 	}
 	if !ok {
 		log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr(), "realm": sess.realm}).
 			Debug("Session does not exists")
-		return sess.abort(resp, errInvalidSession, "Invalid session")
+		return false, sess.abort(resp, errInvalidSession, "Invalid session")
 	}
 
 	if err := sess.ctrl.updateSession(sess.id, 1, 1); err != nil {
 		log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr(), "realm": sess.realm}).
 			Error("Failed to update the session:", err)
+		return false, err
+	}
+
+	return true, nil
+}
+
+func (sess *Session) handlePingMessage(req []interface{}, resp *json.Encoder) error {
+	log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr(), "realm": sess.realm}).
+		Debug("Handle ping message")
+
+	ok, err := sess.ensureRegistered(resp)
+	if !ok {
 		return err
 	}
 
 	return resp.Encode(buildPongMessage())
+}
+
+func (sess *Session) handlePublishMessage(req []interface{}, resp *json.Encoder) error {
+	log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr(), "realm": sess.realm}).
+		Debug("Handle publish message")
+
+	ok, err := sess.ensureRegistered(resp)
+	if !ok {
+		return err
+	}
+
+	if len(req) < 4 {
+		log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr()}).
+			Debug("Invalid publish message payload")
+		return resp.Encode(buildAbortMessage(errProtocolViolation, "Invalid publish message payload"))
+	}
+
+	msg, err := parsePublishMessage(req)
+	if err != nil {
+		log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr()}).
+			Debug("Invalid publish message payload: ", err)
+		return resp.Encode(buildAbortMessage(errProtocolViolation, err.Error()))
+	}
+
+	pubID, err := sess.ctrl.publishMessage(msg.topic, msg.body)
+	if err != nil {
+		log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr()}).
+			Debug("Failed to publish message: ", err)
+		return resp.Encode(buildErrorMessage(messageTypePublish, msg.requestID,
+			errPublishFailed, err.Error()))
+	}
+
+	return resp.Encode(buildPublishedMessage(msg.requestID, pubID))
+}
+
+func parsePublishMessage(req []interface{}) (*publishMessage, error) {
+	if len(req) < 4 {
+		return nil, fmt.Errorf("Invalid payload")
+	}
+
+	msg := &publishMessage{}
+
+	v, err := AnyToFloat64(req[0])
+	if err != nil {
+		return nil, fmt.Errorf("Invalid message type field")
+	}
+	msg.messageType = int(v)
+
+	v, err = AnyToFloat64(req[1])
+	if err != nil {
+		return nil, fmt.Errorf("Invalid request ID field")
+	}
+	msg.requestID = int(v)
+
+	s, err := AnyToString(req[2])
+	if err != nil {
+		return nil, fmt.Errorf("Invalid topic field")
+	}
+	msg.topic = s
+
+	js, err := AnyToJSON(req[3])
+	if err != nil {
+		return nil, fmt.Errorf("Invalid topic field")
+	}
+	msg.body = js
+
+	return msg, nil
 }
 
 func buildAbortMessage(reason error, details string) []interface{} {
@@ -302,6 +433,30 @@ func buildPongMessage() []interface{} {
 	msg = append(msg, details{})
 	return msg
 
+}
+
+// [ERROR, MessageType|integer, Request|id, Error|string, Details|dict]
+func buildErrorMessage(messageType, requestID int, err error, message string) []interface{} {
+	type details struct {
+		Error string `json:"error"`
+	}
+
+	var msg []interface{}
+	msg = append(msg, messageTypeError)
+	msg = append(msg, messageType)
+	msg = append(msg, requestID)
+	msg = append(msg, err.Error())
+	msg = append(msg, details{Error: message})
+	return msg
+}
+
+// [PUBLISHED, Request|id, Publication|id]
+func buildPublishedMessage(requestID, publicationID int) []interface{} {
+	var msg []interface{}
+	msg = append(msg, messageTypePublished)
+	msg = append(msg, requestID)
+	msg = append(msg, publicationID)
+	return msg
 }
 
 // registerSession registers a new websocket session
@@ -553,8 +708,10 @@ func (ctrl *Controller) updateSession(sessionID int32, incrMsgsSendBy, incrMsgsR
 	return nil
 }
 
+// Close cleans up a controller
 func (ctrl *Controller) Close() {
 	ctrl.cleanupSessions()
+	ctrl.ch.Close()
 }
 
 func (ctrl *Controller) cleanupSessions() {
@@ -580,4 +737,33 @@ func (ctrl *Controller) cleanupSessions() {
 			break
 		}
 	}
+}
+
+func (ctrl *Controller) publishMessage(topic string, body []byte) (int, error) {
+	if err := ctrl.ch.ExchangeDeclare(
+		topic,    // name
+		"fanout", // type
+		true,     // durable
+		false,    // auto-deleted
+		false,    // internal
+		false,    // no-wait
+		nil,      // arguments
+	); err != nil {
+		return 0, err
+	}
+
+	if err := ctrl.ch.Publish(
+		topic, // exchange
+		"",    // routing key
+		false, // mandatory
+		false, // immediate
+		amqp.Publishing{
+			ContentType: "text/plain",
+			Body:        []byte(body),
+		}); err != nil {
+		return 0, err
+	}
+
+	// TODO: get a message ID during publish and return it
+	return 1234, nil
 }

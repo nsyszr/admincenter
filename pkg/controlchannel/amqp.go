@@ -1,14 +1,6 @@
 package controlchannel
 
-import (
-	"fmt"
-	"log"
-	"strconv"
-
-	"github.com/streadway/amqp"
-)
-
-func (s *Server) publishMessageToAMQP(topic, body string) (int, error) {
+/*func (s *Server) publishMessageToAMQP(topic, body string) (int, error) {
 	if err := s.ch.ExchangeDeclare(
 		topic,    // name
 		"fanout", // type
@@ -105,3 +97,4 @@ func (s *Server) listenToRPCQueue(rpcQueueName string) error {
 
 	return nil
 }
+*/

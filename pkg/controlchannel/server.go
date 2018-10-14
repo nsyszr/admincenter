@@ -15,7 +15,6 @@ import (
 // Server handles the Control Channel WebSocket connections
 type Server struct {
 	db           *redis.Client
-	ch           *amqp.Channel
 	router       *mux.Router
 	ctrl         *Controller
 	rpcQueueName string
@@ -47,17 +46,15 @@ type publishMessageDetails struct {
 
 // NewServer creates a new Control Channel WebSocket server handler
 func NewServer(db *redis.Client, amqpConn *amqp.Connection, router *mux.Router) (*Server, error) {
-	// Setup a AMQP channel
-	ch, err := amqpConn.Channel()
+	ctrl, err := NewController(db, amqpConn)
 	if err != nil {
 		return nil, err
 	}
 
 	s := &Server{
 		db:     db,
-		ch:     ch,
 		router: router,
-		ctrl:   NewController(db),
+		ctrl:   ctrl,
 	}
 
 	s.configureRoutes()
