@@ -102,6 +102,12 @@ func NewController(redisDB *redis.Client, amqpConn *amqp.Connection) (*Controlle
 	// Remove existing session entries
 	ctrl.cleanupSessions()
 
+	// Create and start RPC queue
+	if err := ctrl.configureRPCQueue("rpc_queue"); err != nil {
+		return nil, err
+	}
+	go ctrl.listenRPCQueue("rpc_queue")
+
 	return ctrl, nil
 }
 
@@ -850,6 +856,75 @@ func (ctrl *Controller) updateIOStats(sess *Session, rxMsgs, txMsgs, rxBytes, tx
 		if err != nil {
 			log.Error("Failed to update stats: ", err)
 		}
+	}
+
+	return nil
+}
+
+func (ctrl *Controller) configureRPCQueue(rpcQueueName string) error {
+	_, err := ctrl.ch.QueueDeclare(
+		rpcQueueName, // name
+		false,        // durable
+		false,        // delete when usused
+		false,        // exclusive
+		false,        // no-wait
+		nil,          // arguments
+	)
+	if err != nil {
+		return err
+	}
+
+	err = ctrl.ch.Qos(
+		1,     // prefetch count
+		0,     // prefetch size
+		false, // global
+	)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (ctrl *Controller) listenRPCQueue(rpcQueueName string) error {
+	if rpcQueueName == "" {
+		// TODO: Better error handling
+		return fmt.Errorf("No rpc queue name set")
+	}
+
+	msgs, err := ctrl.ch.Consume(
+		rpcQueueName, // queue
+		"",           // consumer
+		false,        // auto-ack
+		false,        // exclusive
+		false,        // no-local
+		false,        // no-wait
+		nil,          // args
+	)
+	if err != nil {
+		return err
+	}
+
+	for msg := range msgs {
+		n, _ := strconv.Atoi(string(msg.Body))
+		// failOnError(err, "Failed to convert body to integer")
+
+		log.Printf(" [.] fib(%d)", n)
+		response := 1 // fib(n)
+
+		err = ctrl.ch.Publish(
+			"",          // exchange
+			msg.ReplyTo, // routing key
+			false,       // mandatory
+			false,       // immediate
+			amqp.Publishing{
+				ContentType:   "text/plain",
+				CorrelationId: msg.CorrelationId,
+				Body:          []byte(strconv.Itoa(response)),
+			})
+		// failOnError(err, "Failed to publish a message")
+
+		msg.Ack(false)
 	}
 
 	return nil
