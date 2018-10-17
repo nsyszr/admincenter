@@ -1,13 +1,23 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"math/rand"
-	"strconv"
 
 	log "github.com/Sirupsen/logrus"
 	"github.com/streadway/amqp"
 )
+
+type rpcRequest struct {
+	Realm     string      `json:"realm"`
+	Operation string      `json:"operation"`
+	Arguments interface{} `json:"args"`
+}
+
+type rpcArgumentsM3CLI struct {
+	Command string `json:"command"`
+}
 
 func init() {
 	// flag.Usage = usage
@@ -73,6 +83,19 @@ func main() {
 	)
 
 	corrID := randomString(32)
+	//cmd := `-----LUA-----\nres=cli("administration.hostnames.hostname")\nprint(res)\n-----LUA-----\n`
+	/*cmd := `-----LUA-----
+	print("Hello from LUA")
+	-----LUA-----
+	`*/
+	cmd := "status.sysdetail.system.mac"
+	req := rpcRequest{
+		Realm:     "1234@devices.iot.insys-icom.com",
+		Operation: "m3_cli",
+		Arguments: rpcArgumentsM3CLI{Command: cmd}, // status.device_info
+	}
+
+	js, _ := json.Marshal(req)
 
 	err = ch.Publish(
 		"",          // exchange
@@ -83,7 +106,7 @@ func main() {
 			ContentType:   "text/plain",
 			CorrelationId: corrID,
 			ReplyTo:       q.Name,
-			Body:          []byte(strconv.Itoa(123)),
+			Body:          js, // []byte(strconv.Itoa(123)),
 		})
 	if err != nil {
 		log.Error(err)
@@ -92,12 +115,12 @@ func main() {
 
 	for d := range msgs {
 		if corrID == d.CorrelationId {
-			res, err := strconv.Atoi(string(d.Body))
+			// res, err := strconv.Atoi(string(d.Body))
 			// failOnError(err, "Failed to convert body to integer")
 			if err != nil {
 				log.Error(err)
 			}
-			log.Printf("rpc_queue result: corr_id=%s, res=%d\n", corrID, res)
+			log.Printf("rpc_queue result: corr_id=%s, res=%s\n", corrID, string(d.Body))
 			break
 		}
 	}

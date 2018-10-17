@@ -180,8 +180,9 @@ func (sess *Session) listen() error {
 			return err
 		}
 
+		debugJs, _ := json.Marshal(msg)
 		log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr(), "length": hdr.Length}).
-			Debugf("Received message: %v", msg)
+			Debugf("Received message: %s", string(debugJs))
 
 		// Update IO statistics
 		sess.ctrl.updateIOStats(sess, 1, 0, int64(hdr.Length), 0)
@@ -214,7 +215,10 @@ func (sess *Session) writeMessage(w *wsutil.Writer, msg []interface{}) error {
 	}
 
 	log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr(), "length": n}).
-		Debugf("Send message: %v", msg)
+		Debugf("Send JSON message: %s", string(payload))
+
+	//log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr(), "length": n}).
+	//	Debugf("Send message: %v", msg)
 
 	// Update IO statistics
 	sess.ctrl.updateIOStats(sess, 0, 1, 0, int64(n))
@@ -485,6 +489,16 @@ func buildErrorMessage(msgType, requestID int, err error, message string) []inte
 	msg = append(msg, requestID)
 	msg = append(msg, err.Error())
 	msg = append(msg, details{Error: message})
+	return msg
+}
+
+// [CALL, Request|id, Operation|string, Arguments|dict]
+func buildCallMessage(requestID int, operation string, args interface{}) []interface{} {
+	var msg []interface{}
+	msg = append(msg, messageTypeCall)
+	msg = append(msg, requestID)
+	msg = append(msg, operation)
+	msg = append(msg, args)
 	return msg
 }
 
@@ -887,6 +901,22 @@ func (ctrl *Controller) configureRPCQueue(rpcQueueName string) error {
 }
 
 func (ctrl *Controller) listenRPCQueue(rpcQueueName string) error {
+	type rpcRequest struct {
+		Realm     string      `json:"realm"`
+		Operation string      `json:"operation"`
+		Arguments interface{} `json:"args"`
+	}
+
+	type rpcError struct {
+		Code    int    `json:"code"`
+		Message string `json:"message"`
+	}
+
+	type rpcResponse struct {
+		Error  rpcError    `json:"error,omitempty"`
+		Result interface{} `json:"result,omitempty"`
+	}
+
 	if rpcQueueName == "" {
 		// TODO: Better error handling
 		return fmt.Errorf("No rpc queue name set")
@@ -906,11 +936,49 @@ func (ctrl *Controller) listenRPCQueue(rpcQueueName string) error {
 	}
 
 	for msg := range msgs {
-		n, _ := strconv.Atoi(string(msg.Body))
-		// failOnError(err, "Failed to convert body to integer")
 
-		log.Printf(" [.] fib(%d)", n)
-		response := 1 // fib(n)
+		req := rpcRequest{}
+		resp := rpcResponse{Error: rpcError{}}
+		hasError := false
+
+		if err := json.Unmarshal(msg.Body, &req); err != nil {
+			resp.Error.Code = 1000
+			resp.Error.Message = err.Error()
+			hasError = true
+		}
+
+		//n, _ := strconv.Atoi(string(msg.Body))
+		// failOnError(err, "Failed to convert body to integer")
+		if !hasError {
+			log.Printf("RPC request received: ", req)
+			// response := 1 // fib(n)
+			exists, err := ctrl.existsSessionForRealm(req.Realm)
+			if err != nil {
+				hasError = true
+				resp.Error.Code = 1001
+				resp.Error.Message = err.Error()
+			} else if !exists {
+				hasError = true
+				resp.Error.Code = 2000
+				resp.Error.Message = "No session for given devices realm"
+			} else {
+				ctrl.mu.Lock()
+				sess := ctrl.sessions[req.Realm]
+				ctrl.mu.Unlock()
+
+				w := wsutil.NewWriter(sess.conn, ws.StateServerSide, ws.OpText)
+				if err := sess.writeMessage(w, buildCallMessage(1234, req.Operation, req.Arguments)); err != nil {
+					log.Printf("listen to rpc error: %s", err.Error())
+				}
+				if err := w.Flush(); err != nil {
+					log.Printf("listen to rpc error: %s", err.Error())
+				}
+			}
+		} else {
+			log.Printf("Error: ", resp.Error.Message)
+		}
+
+		js, _ := json.Marshal(resp)
 
 		err = ctrl.ch.Publish(
 			"",          // exchange
@@ -920,7 +988,7 @@ func (ctrl *Controller) listenRPCQueue(rpcQueueName string) error {
 			amqp.Publishing{
 				ContentType:   "text/plain",
 				CorrelationId: msg.CorrelationId,
-				Body:          []byte(strconv.Itoa(response)),
+				Body:          js, // []byte(strconv.Itoa(response)),
 			})
 		// failOnError(err, "Failed to publish a message")
 
