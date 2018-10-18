@@ -4,12 +4,11 @@ import (
 	"flag"
 	"net/http"
 
-	"github.com/gorilla/mux"
-	"github.com/streadway/amqp"
-
 	log "github.com/Sirupsen/logrus"
 	"github.com/go-redis/redis"
+	"github.com/gorilla/mux"
 	"github.com/nsyszr/admincenter/pkg/controlchannel"
+	"github.com/streadway/amqp"
 )
 
 func init() {
