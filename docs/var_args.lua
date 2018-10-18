@@ -1,5 +1,6 @@
 function seq(...) for k,v in pairs({...}) do print(k,v) end end
 function foo(...) for k,v in pairs({...}) do print(k,v) end end
+
 function nothing(...) 
     local s = ""
     for _, v in pairs({...}) do s = s .. v .. "\n" end 
