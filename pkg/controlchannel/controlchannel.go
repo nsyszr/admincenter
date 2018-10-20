@@ -53,10 +53,11 @@ type Session struct {
 
 // Controller contains logic for managing control channel sessions
 type Controller struct {
-	redisDB  *redis.Client
-	mu       sync.RWMutex
-	sessions map[string]*Session
-	ch       *amqp.Channel
+	redisDB    *redis.Client
+	mu         sync.RWMutex
+	sessions   map[string]*Session
+	rpcReplyTo map[int32]string
+	ch         *amqp.Channel
 }
 
 type clientConfig struct {
@@ -71,6 +72,12 @@ type publishMessage struct {
 	requestID   int
 	topic       string
 	body        []byte
+}
+
+type resultMessage struct {
+	messageType int
+	requestID   int32
+	results     []byte
 }
 
 // NewSession returns an instance of control channel session
@@ -94,9 +101,10 @@ func NewController(redisDB *redis.Client, amqpConn *amqp.Connection) (*Controlle
 
 	// Create new controller
 	ctrl := &Controller{
-		redisDB:  redisDB,
-		sessions: make(map[string]*Session), // Key is realm
-		ch:       ch,
+		redisDB:    redisDB,
+		sessions:   make(map[string]*Session), // Key is realm
+		rpcReplyTo: make(map[int32]string),
+		ch:         ch,
 	}
 
 	// Remove existing session entries
@@ -290,6 +298,8 @@ func (sess *Session) handleMessage(msg []interface{}, w *wsutil.Writer) error {
 		return sess.handlePingMessage(msg, w)
 	case messageTypePublish:
 		return sess.handlePublishMessage(msg, w)
+	case messageTypeResult:
+		return sess.handleResultMessage(msg, w)
 	}
 
 	return nil
@@ -406,6 +416,33 @@ func (sess *Session) handlePublishMessage(msg []interface{}, w *wsutil.Writer) e
 	return sess.writeMessage(w, buildPublishedMessage(publishMsg.requestID, publishID))
 }
 
+func (sess *Session) handleResultMessage(msg []interface{}, w *wsutil.Writer) error {
+	log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr(), "realm": sess.realm}).
+		Debug("Handle result message")
+
+	if len(msg) < 3 {
+		log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr()}).
+			Debug("Invalid publish message payload")
+		return sess.writeMessage(w, buildAbortMessage(errProtocolViolation, "Invalid result message payload"))
+	}
+
+	resultMsg, err := parseResultMessage(msg)
+	if err != nil {
+		log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr()}).
+			Debug("Invalid publish message payload: ", err)
+		return sess.writeMessage(w, buildAbortMessage(errProtocolViolation, err.Error()))
+	}
+
+	if err := sess.ctrl.responseResult(resultMsg.requestID, resultMsg.results); err != nil {
+		log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr()}).
+			Debug("Failed to response result message: ", err)
+		return err
+	}
+
+	log.Debug("handleResultMessage was successfully")
+	return nil
+}
+
 func parsePublishMessage(msg []interface{}) (*publishMessage, error) {
 	if len(msg) < 4 {
 		return nil, fmt.Errorf("Invalid payload")
@@ -438,6 +475,35 @@ func parsePublishMessage(msg []interface{}) (*publishMessage, error) {
 	publishMsg.body = js
 
 	return publishMsg, nil
+}
+
+// [11,1234,{"output":["00:05:B6:03:1B:A0"]}]
+func parseResultMessage(msg []interface{}) (*resultMessage, error) {
+	if len(msg) < 3 {
+		return nil, fmt.Errorf("Invalid payload")
+	}
+
+	resultMsg := &resultMessage{}
+
+	v, err := AnyToFloat64(msg[0])
+	if err != nil {
+		return nil, fmt.Errorf("Invalid message type field")
+	}
+	resultMsg.messageType = int(v)
+
+	v, err = AnyToFloat64(msg[1])
+	if err != nil {
+		return nil, fmt.Errorf("Invalid request ID field")
+	}
+	resultMsg.requestID = int32(v)
+
+	js, err := AnyToJSON(msg[2])
+	if err != nil {
+		return nil, fmt.Errorf("Invalid topic field")
+	}
+	resultMsg.results = js
+
+	return resultMsg, nil
 }
 
 func buildAbortMessage(reason error, details string) []interface{} {
@@ -493,7 +559,7 @@ func buildErrorMessage(msgType, requestID int, err error, message string) []inte
 }
 
 // [CALL, Request|id, Operation|string, Arguments|dict]
-func buildCallMessage(requestID int, operation string, args interface{}) []interface{} {
+func buildCallMessage(requestID int32, operation string, args interface{}) []interface{} {
 	var msg []interface{}
 	msg = append(msg, messageTypeCall)
 	msg = append(msg, requestID)
@@ -723,6 +789,12 @@ func generateRandomSessionID() int32 {
 	return 1 + rand.Int31()
 }
 
+// TODO: Duplicate with above and place this to a util package
+func generateRandomID() int32 {
+	rand.Seed(time.Now().UnixNano())
+	return 1 + rand.Int31()
+}
+
 // existsSession returns if a session with the given ID exists
 func (ctrl *Controller) existsSession(id int32) (bool, error) {
 	key := fmt.Sprintf("sessions:%d", id)
@@ -807,6 +879,34 @@ func (ctrl *Controller) publishMessage(topic string, body []byte) (int, error) {
 
 	// TODO: get a message ID during publish and return it
 	return 1234, nil
+}
+
+func (ctrl *Controller) responseResult(requestID int32, result []byte) error {
+	log.Debug("Enter Controller.responseResult")
+
+	ctrl.mu.Lock()
+	replyTo, ok := ctrl.rpcReplyTo[requestID]
+	ctrl.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("Cannot find RPC reply to queue")
+	}
+
+	log.Debugf("Sending result to '%s' with CorrID %d: %s", replyTo, requestID, string(result))
+	err := ctrl.ch.Publish(
+		"",      // exchange
+		replyTo, // routing key
+		false,   // mandatory
+		false,   // immediate
+		amqp.Publishing{
+			ContentType:   "text/plain",
+			CorrelationId: strconv.FormatInt(int64(requestID), 10),
+			Body:          result,
+		})
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
 
 func (ctrl *Controller) updateIOStats(sess *Session, rxMsgs, txMsgs, rxBytes, txBytes int64) error {
@@ -947,11 +1047,8 @@ func (ctrl *Controller) listenRPCQueue(rpcQueueName string) error {
 			hasError = true
 		}
 
-		//n, _ := strconv.Atoi(string(msg.Body))
-		// failOnError(err, "Failed to convert body to integer")
 		if !hasError {
-			log.Printf("RPC request received: ", req)
-			// response := 1 // fib(n)
+			log.Debug("RPC request received: ", req)
 			exists, err := ctrl.existsSessionForRealm(req.Realm)
 			if err != nil {
 				hasError = true
@@ -967,30 +1064,21 @@ func (ctrl *Controller) listenRPCQueue(rpcQueueName string) error {
 				ctrl.mu.Unlock()
 
 				w := wsutil.NewWriter(sess.conn, ws.StateServerSide, ws.OpText)
-				if err := sess.writeMessage(w, buildCallMessage(1234, req.Operation, req.Arguments)); err != nil {
+				requestID, _ := strconv.ParseInt(msg.CorrelationId, 10, 32)
+				if err := sess.writeMessage(w, buildCallMessage(int32(requestID), req.Operation, req.Arguments)); err != nil {
 					log.Printf("listen to rpc error: %s", err.Error())
 				}
 				if err := w.Flush(); err != nil {
 					log.Printf("listen to rpc error: %s", err.Error())
 				}
+
+				ctrl.mu.Lock()
+				ctrl.rpcReplyTo[int32(requestID)] = msg.ReplyTo
+				ctrl.mu.Unlock()
 			}
 		} else {
 			log.Printf("Error: ", resp.Error.Message)
 		}
-
-		js, _ := json.Marshal(resp)
-
-		err = ctrl.ch.Publish(
-			"",          // exchange
-			msg.ReplyTo, // routing key
-			false,       // mandatory
-			false,       // immediate
-			amqp.Publishing{
-				ContentType:   "text/plain",
-				CorrelationId: msg.CorrelationId,
-				Body:          js, // []byte(strconv.Itoa(response)),
-			})
-		// failOnError(err, "Failed to publish a message")
 
 		msg.Ack(false)
 	}
