@@ -1,0 +1,2 @@
+administration.remote_management.active=0
+administration.profiles.activate

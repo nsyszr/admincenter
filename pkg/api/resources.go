@@ -42,3 +42,7 @@ type SessionRunRealmResponse struct {
 	Error   *ErrorResponse `json:"error,omitempty"`
 	Results interface{}    `json:"results,omitempty"`
 }
+
+type RPCM3CLIResult struct {
+	Output []string `json:"output"`
+}

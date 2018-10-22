@@ -4,10 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand"
 	"net"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -15,6 +13,10 @@ import (
 	"github.com/go-redis/redis"
 	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
+	"github.com/nsyszr/admincenter/pkg/controlchannel/manager"
+	redismanager "github.com/nsyszr/admincenter/pkg/controlchannel/manager/redis"
+	"github.com/nsyszr/admincenter/pkg/stats"
+	"github.com/nsyszr/admincenter/pkg/util/typeconv"
 	"github.com/streadway/amqp"
 )
 
@@ -53,23 +55,25 @@ type Session struct {
 
 // Controller contains logic for managing control channel sessions
 type Controller struct {
-	redisDB    *redis.Client
-	mu         sync.RWMutex
-	sessions   map[string]*Session
-	rpcReplyTo map[int32]string
-	ch         *amqp.Channel
+	// redisDB    *redis.Client
+	mgr            manager.SessionManager
+	statsCollector *stats.Collector
+	mu             sync.RWMutex
+	sessions       map[string]*Session
+	rpcReplyTo     map[int32]string
+	ch             *amqp.Channel
 }
 
-type clientConfig struct {
+/*type clientConfig struct {
 	sessionTimeout int
 	pingInterval   int
 	pongTimeout    int
 	eventsTopic    string
-}
+}*/
 
 type publishMessage struct {
 	messageType int
-	requestID   int
+	requestID   int32
 	topic       string
 	body        []byte
 }
@@ -92,7 +96,7 @@ func NewSession(conn net.Conn, ctrl *Controller) *Session {
 }
 
 // NewController returns an instance of control channel controller
-func NewController(redisDB *redis.Client, amqpConn *amqp.Connection) (*Controller, error) {
+func NewController(redisClient *redis.Client, amqpConn *amqp.Connection) (*Controller, error) {
 	// Setup a AMQP channel
 	ch, err := amqpConn.Channel()
 	if err != nil {
@@ -101,14 +105,16 @@ func NewController(redisDB *redis.Client, amqpConn *amqp.Connection) (*Controlle
 
 	// Create new controller
 	ctrl := &Controller{
-		redisDB:    redisDB,
-		sessions:   make(map[string]*Session), // Key is realm
-		rpcReplyTo: make(map[int32]string),
-		ch:         ch,
+		// redisDB:    redisDB,
+		mgr:            redismanager.NewSessionManager(redisClient),
+		statsCollector: stats.NewCollector(redisClient),
+		sessions:       make(map[string]*Session), // Key is realm
+		rpcReplyTo:     make(map[int32]string),
+		ch:             ch,
 	}
 
 	// Remove existing session entries
-	ctrl.cleanupSessions()
+	ctrl.mgr.CleanupSessions()
 
 	// Create and start RPC queue
 	if err := ctrl.configureRPCQueue("rpc_queue"); err != nil {
@@ -193,7 +199,7 @@ func (sess *Session) listen() error {
 			Debugf("Received message: %s", string(debugJs))
 
 		// Update IO statistics
-		sess.ctrl.updateIOStats(sess, 1, 0, int64(hdr.Length), 0)
+		sess.ctrl.statsCollector.UpdateSessionIOStats(sess.realm, sess.conn.RemoteAddr().String(), 1, 0, int64(hdr.Length), 0)
 
 		if err := sess.handleMessage(msg, w); err != nil {
 			log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr()}).
@@ -229,39 +235,10 @@ func (sess *Session) writeMessage(w *wsutil.Writer, msg []interface{}) error {
 	//	Debugf("Send message: %v", msg)
 
 	// Update IO statistics
-	sess.ctrl.updateIOStats(sess, 0, 1, 0, int64(n))
+	sess.ctrl.statsCollector.UpdateSessionIOStats(sess.realm, sess.conn.RemoteAddr().String(), 0, 1, 0, int64(n))
 
 	return nil
 
-}
-
-// AnyToFloat64 returns a float64 for given empty interface
-func AnyToFloat64(v interface{}) (float64, error) {
-	switch v.(type) {
-	case float64:
-		return v.(float64), nil
-	default:
-		return 0, fmt.Errorf("Type conversion failed")
-	}
-}
-
-// AnyToString returns a string for given empty interface
-func AnyToString(v interface{}) (string, error) {
-	switch v.(type) {
-	case string:
-		return v.(string), nil
-	default:
-		return "", fmt.Errorf("Type conversion failed")
-	}
-}
-
-// AnyToJSON returns a JSON byte array
-func AnyToJSON(v interface{}) ([]byte, error) {
-	js, err := json.Marshal(v)
-	if err != nil {
-		return nil, fmt.Errorf("Type conversion failed")
-	}
-	return js, nil
 }
 
 func (sess *Session) handleMessage(msg []interface{}, w *wsutil.Writer) error {
@@ -271,7 +248,7 @@ func (sess *Session) handleMessage(msg []interface{}, w *wsutil.Writer) error {
 
 	// Resolve the message type
 	var msgType int
-	v, err := AnyToFloat64(msg[0])
+	v, err := typeconv.AnyToFloat64(msg[0])
 	if err != nil {
 		return err
 	}
@@ -316,21 +293,21 @@ func (sess *Session) handleHelloMessage(msg []interface{}, w *wsutil.Writer) err
 		return sess.writeMessage(w, buildAbortMessage(errInvalidRealm, "No or invalid realm given"))
 	}
 
-	sessID, cfg, ok, err := sess.ctrl.registerSession(msg[1].(string), sess)
-	if !ok && err != nil {
+	sessID, cfg, err := sess.ctrl.registerSession(msg[1].(string), sess)
+	// Check if we've got a no such realm error and abort the session. If a
+	// different error occures, return error for handling.
+	if err == manager.ErrNoSuchRealm {
+		log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr()}).
+			Debug("Failed to register new session:", err)
+		return sess.writeMessage(w, buildAbortMessage(err, "Failed to register new session"))
+	} else if err != nil {
 		log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr()}).
 			Error("Failed to register new session:", err)
 		return err
 	}
-	if err != nil {
-		log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr()}).
-			Debug("Failed to register new session:", err)
-		// return resp.Encode(buildAbortMessage(err, "Failed to register new session"))
-		return sess.writeMessage(w, buildAbortMessage(err, "Failed to register new session"))
-	}
 
-	return sess.writeMessage(w, buildWelcomeMessage(sessID, cfg.sessionTimeout,
-		cfg.pingInterval, cfg.pongTimeout, cfg.eventsTopic))
+	return sess.writeMessage(w, buildWelcomeMessage(sessID, cfg.SessionTimeout,
+		cfg.PingInterval, cfg.PongTimeout, cfg.EventsTopic))
 }
 
 func (sess *Session) abort(w *wsutil.Writer, err error, details string) error {
@@ -344,19 +321,19 @@ func (sess *Session) abort(w *wsutil.Writer, err error, details string) error {
 	return nil
 }
 func (sess *Session) ensureRegistered(w *wsutil.Writer) (bool, error) {
-	ok, err := sess.ctrl.existsSession(sess.id)
+	exists, err := sess.ctrl.mgr.ExistsSession(sess.id)
 	if err != nil {
 		log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr(), "realm": sess.realm}).
 			Error("Failed to check if session exists:", err)
 		return false, err
 	}
-	if !ok {
+	if !exists {
 		log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr(), "realm": sess.realm}).
 			Debug("Session does not exists")
 		return false, sess.abort(w, errInvalidSession, "Invalid session")
 	}
 
-	if err := sess.ctrl.updateSession(sess); err != nil {
+	if err := sess.ctrl.mgr.RenewSession(sess.id); err != nil {
 		log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr(), "realm": sess.realm}).
 			Error("Failed to update the session:", err)
 		return false, err
@@ -450,25 +427,25 @@ func parsePublishMessage(msg []interface{}) (*publishMessage, error) {
 
 	publishMsg := &publishMessage{}
 
-	v, err := AnyToFloat64(msg[0])
+	v, err := typeconv.AnyToFloat64(msg[0])
 	if err != nil {
 		return nil, fmt.Errorf("Invalid message type field")
 	}
 	publishMsg.messageType = int(v)
 
-	v, err = AnyToFloat64(msg[1])
+	v, err = typeconv.AnyToFloat64(msg[1])
 	if err != nil {
 		return nil, fmt.Errorf("Invalid request ID field")
 	}
-	publishMsg.requestID = int(v)
+	publishMsg.requestID = int32(v)
 
-	s, err := AnyToString(msg[2])
+	s, err := typeconv.AnyToString(msg[2])
 	if err != nil {
 		return nil, fmt.Errorf("Invalid topic field")
 	}
 	publishMsg.topic = s
 
-	js, err := AnyToJSON(msg[3])
+	js, err := typeconv.AnyToJSON(msg[3])
 	if err != nil {
 		return nil, fmt.Errorf("Invalid topic field")
 	}
@@ -485,19 +462,19 @@ func parseResultMessage(msg []interface{}) (*resultMessage, error) {
 
 	resultMsg := &resultMessage{}
 
-	v, err := AnyToFloat64(msg[0])
+	v, err := typeconv.AnyToFloat64(msg[0])
 	if err != nil {
 		return nil, fmt.Errorf("Invalid message type field")
 	}
 	resultMsg.messageType = int(v)
 
-	v, err = AnyToFloat64(msg[1])
+	v, err = typeconv.AnyToFloat64(msg[1])
 	if err != nil {
 		return nil, fmt.Errorf("Invalid request ID field")
 	}
 	resultMsg.requestID = int32(v)
 
-	js, err := AnyToJSON(msg[2])
+	js, err := typeconv.AnyToJSON(msg[2])
 	if err != nil {
 		return nil, fmt.Errorf("Invalid topic field")
 	}
@@ -544,7 +521,7 @@ func buildPongMessage() []interface{} {
 }
 
 // [ERROR, MessageType|integer, Request|id, Error|string, Details|dict]
-func buildErrorMessage(msgType, requestID int, err error, message string) []interface{} {
+func buildErrorMessage(msgType int, requestID int32, err error, message string) []interface{} {
 	type details struct {
 		Error string `json:"error"`
 	}
@@ -569,7 +546,7 @@ func buildCallMessage(requestID int32, operation string, args interface{}) []int
 }
 
 // [PUBLISHED, Request|id, Publication|id]
-func buildPublishedMessage(requestID, publicationID int) []interface{} {
+func buildPublishedMessage(requestID, publicationID int32) []interface{} {
 	var msg []interface{}
 	msg = append(msg, messageTypePublished)
 	msg = append(msg, requestID)
@@ -578,31 +555,31 @@ func buildPublishedMessage(requestID, publicationID int) []interface{} {
 }
 
 // registerSession registers a new websocket session
-func (ctrl *Controller) registerSession(realm string, sess *Session) (int32, *clientConfig, bool, error) {
-	cfg, ok, err := ctrl.getClientConfig(realm)
+func (ctrl *Controller) registerSession(realm string, sess *Session) (int32, *manager.SessionConfig, error) {
+	cfg, err := ctrl.mgr.GetSessionConfig(realm)
 	if err != nil {
-		return 0, nil, ok, err
+		return 0, nil, err
 	}
 
-	exists, err := ctrl.existsSessionForRealm(realm)
+	exists, err := ctrl.mgr.ExistsSessionForRealm(realm)
 	if err != nil {
-		return 0, nil, false, err
+		return 0, nil, err
 	}
 	if exists {
-		return 0, nil, true, errSessionExists
+		return 0, nil, errSessionExists
 	}
 
-	sessionID, err := ctrl.createSession(realm, cfg)
+	sessID, err := ctrl.mgr.CreateSession(realm, cfg)
 	if err != nil {
-		return 0, nil, false, err
+		return 0, nil, err
 	}
 
 	// Add session to session map
 	// Tell the sesssion that it's registered
 	// TODO: rethink the updates of the session in this way
 	sess.realm = realm
-	sess.id = sessionID
-	sess.timeout = cfg.sessionTimeout
+	sess.id = sessID
+	sess.timeout = cfg.SessionTimeout
 	sess.registeredCh <- true
 	sess.registered = true
 	log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr(), "realm": sess.realm}).
@@ -612,7 +589,7 @@ func (ctrl *Controller) registerSession(realm string, sess *Session) (int32, *cl
 	ctrl.sessions[realm] = sess
 	ctrl.mu.Unlock()
 
-	return sessionID, cfg, true, nil
+	return sessID, cfg, nil
 }
 
 func (ctrl *Controller) unregisterSession(sess *Session) {
@@ -628,25 +605,11 @@ func (ctrl *Controller) unregisterSession(sess *Session) {
 	delete(ctrl.sessions, sess.realm)
 	ctrl.mu.Unlock()
 
-	exists, err := ctrl.existsSessionForRealm(sess.realm)
-	if err != nil {
-		return
-	}
-	if !exists {
-		return
-	}
-
-	// Remove the session from the database to ensure that the client can
-	// reconnect again immediately.
-	sessionKey := fmt.Sprintf("sessions:%d", sess.id)
-	_, err = ctrl.redisDB.Del(sessionKey).Result()
-	if err != nil {
-		log.WithFields(log.Fields{"remoteAddr": sess.conn.RemoteAddr(), "realm": sess.realm}).
-			Error("Failed to remove session: ", err)
-	}
+	// TODO: Add error logging
+	ctrl.mgr.RemoveSession(sess.id)
 }
 
-func (ctrl *Controller) getClientConfig(realm string) (*clientConfig, bool, error) {
+/*func (ctrl *Controller) getClientConfig(realm string) (*clientConfig, bool, error) {
 	key := keyFromRealm(realm, "clients", "")
 	if key == "" {
 		return nil, true, errInvalidRealm
@@ -750,7 +713,7 @@ func (ctrl *Controller) existsSessionForRealm(realm string) (bool, error) {
 
 func (ctrl *Controller) createSession(realm string, cfg *clientConfig) (int32, error) {
 	for {
-		sessionID := generateRandomSessionID()
+		sessionID := rand.GenerateRandomInt32()
 		sessionKey := fmt.Sprintf("sessions:%d", sessionID)
 
 		// HSETNX ensures that the key doesn't exists before it's added
@@ -784,17 +747,6 @@ func (ctrl *Controller) createSession(realm string, cfg *clientConfig) (int32, e
 	}
 }
 
-func generateRandomSessionID() int32 {
-	rand.Seed(time.Now().UnixNano())
-	return 1 + rand.Int31()
-}
-
-// TODO: Duplicate with above and place this to a util package
-func generateRandomID() int32 {
-	rand.Seed(time.Now().UnixNano())
-	return 1 + rand.Int31()
-}
-
 // existsSession returns if a session with the given ID exists
 func (ctrl *Controller) existsSession(id int32) (bool, error) {
 	key := fmt.Sprintf("sessions:%d", id)
@@ -819,15 +771,15 @@ func (ctrl *Controller) updateSession(sess *Session) error {
 	ctrl.redisDB.Expire(sessionKey, time.Duration(sess.timeout)*time.Second)
 
 	return nil
-}
+}*/
 
 // Close cleans up a controller
 func (ctrl *Controller) Close() {
-	ctrl.cleanupSessions()
+	ctrl.mgr.CleanupSessions()
 	ctrl.ch.Close()
 }
 
-func (ctrl *Controller) cleanupSessions() {
+/*func (ctrl *Controller) cleanupSessions() {
 	var cursor uint64
 	for {
 		var keys []string
@@ -850,9 +802,9 @@ func (ctrl *Controller) cleanupSessions() {
 			break
 		}
 	}
-}
+}*/
 
-func (ctrl *Controller) publishMessage(topic string, body []byte) (int, error) {
+func (ctrl *Controller) publishMessage(topic string, body []byte) (int32, error) {
 	if err := ctrl.ch.ExchangeDeclare(
 		topic,    // name
 		"fanout", // type
@@ -909,7 +861,7 @@ func (ctrl *Controller) responseResult(requestID int32, result []byte) error {
 	return nil
 }
 
-func (ctrl *Controller) updateIOStats(sess *Session, rxMsgs, txMsgs, rxBytes, txBytes int64) error {
+/*func (ctrl *Controller) updateIOStats(sess *Session, rxMsgs, txMsgs, rxBytes, txBytes int64) error {
 	// key := keyFromRealm(realm, "stats", "io")
 	key := fmt.Sprintf("stats:%s:io", sess.conn.RemoteAddr())
 
@@ -973,7 +925,7 @@ func (ctrl *Controller) updateIOStats(sess *Session, rxMsgs, txMsgs, rxBytes, tx
 	}
 
 	return nil
-}
+}*/
 
 func (ctrl *Controller) configureRPCQueue(rpcQueueName string) error {
 	_, err := ctrl.ch.QueueDeclare(
@@ -1049,7 +1001,7 @@ func (ctrl *Controller) listenRPCQueue(rpcQueueName string) error {
 
 		if !hasError {
 			log.Debug("RPC request received: ", req)
-			exists, err := ctrl.existsSessionForRealm(req.Realm)
+			exists, err := ctrl.mgr.ExistsSessionForRealm(req.Realm)
 			if err != nil {
 				hasError = true
 				resp.Error.Code = 1001

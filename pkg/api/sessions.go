@@ -3,13 +3,13 @@ package api
 import (
 	"encoding/json"
 	"fmt"
-	"math/rand"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	log "github.com/Sirupsen/logrus"
+	"github.com/nsyszr/admincenter/pkg/util/rand"
 	"github.com/streadway/amqp"
 )
 
@@ -213,6 +213,7 @@ func (s *Server) handlePostSessionsRun() http.HandlerFunc {
 					Success: false,
 				}
 
+				log.Debugf("RPC M3 CLI encoded command: %s", sessionRunRequest.Command)
 				rpcResult, err := s.rpcM3CLI(realm, sessionRunRequest.Command)
 				if err != nil {
 					result.Error = &ErrorResponse{
@@ -301,14 +302,20 @@ func (s *Server) rpcM3CLI(realm, cmd string) (*rpcResultsM3CLI, error) {
 		nil,    // args
 	)
 
-	corrID := generateRandomID()
+	log.Debugf("RPC Request cmd: %s", cmd)
+
+	corrID := rand.GenerateRandomInt32()
 	req := rpcRequest{
 		Realm:     realm,
 		Operation: "m3_cli",
-		Arguments: rpcArgumentsM3CLI{Command: cmd},
+		Arguments: &rpcArgumentsM3CLI{Command: cmd},
 	}
 
-	js, _ := json.Marshal(req)
+	js, err := json.Marshal(req)
+	if err != nil {
+		log.Debugf("RPC Request Marshal Error: %s", err)
+	}
+	log.Debugf("RPC Request: %s", js)
 
 	err = ch.Publish(
 		"",          // exchange
@@ -345,10 +352,4 @@ func (s *Server) rpcM3CLI(realm, cmd string) (*rpcResultsM3CLI, error) {
 	}
 
 	return nil, nil
-}
-
-// TODO: Place this method into a util package
-func generateRandomID() int32 {
-	rand.Seed(time.Now().UnixNano())
-	return 1 + rand.Int31()
 }
