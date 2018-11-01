@@ -5,11 +5,10 @@ import (
 	"time"
 
 	log "github.com/Sirupsen/logrus"
-	"github.com/gobwas/ws"
-	"github.com/streadway/amqp"
-
 	"github.com/go-redis/redis"
+	"github.com/gobwas/ws"
 	"github.com/gorilla/mux"
+	"github.com/streadway/amqp"
 )
 
 // Server handles the Control Channel WebSocket connections
@@ -64,6 +63,7 @@ func NewServer(db *redis.Client, amqpConn *amqp.Connection, router *mux.Router) 
 
 func (s *Server) configureRoutes() {
 	s.router.HandleFunc("/cch", s.handleControlChannel())
+	s.router.HandleFunc("/health", s.handleHealth())
 }
 
 func (s *Server) handleControlChannel() http.HandlerFunc {
@@ -83,5 +83,14 @@ func (s *Server) handleControlChannel() http.HandlerFunc {
 		sess := NewSession(conn, s.ctrl)
 		go sess.ensureWelcomeMessage()
 		go sess.listen()
+	}
+}
+
+func (s *Server) handleHealth() http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		log.WithFields(log.Fields{"remoteAddr": r.RemoteAddr}).
+			Debug("New health request")
+		w.WriteHeader(200)
+		w.Write([]byte("OK\n"))
 	}
 }
