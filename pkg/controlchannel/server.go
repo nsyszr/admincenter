@@ -4,10 +4,10 @@ import (
 	"net/http"
 	"time"
 
-	log "github.com/Sirupsen/logrus"
 	"github.com/go-redis/redis"
 	"github.com/gobwas/ws"
 	"github.com/gorilla/mux"
+	log "github.com/sirupsen/logrus"
 	"github.com/streadway/amqp"
 )
 

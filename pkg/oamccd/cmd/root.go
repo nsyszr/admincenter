@@ -8,10 +8,10 @@ import (
 	"net/http"
 	"os"
 
-	log "github.com/Sirupsen/logrus"
 	"github.com/go-redis/redis"
 	"github.com/gorilla/mux"
 	"github.com/nsyszr/admincenter/pkg/controlchannel"
+	log "github.com/sirupsen/logrus"
 	"github.com/spf13/cobra"
 	"github.com/streadway/amqp"
 )

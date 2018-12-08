@@ -1,22 +1,16 @@
 package main
 
 import (
-	"context"
-	"fmt"
-	"net/http"
-	"os"
-	"os/signal"
-
-	log "github.com/Sirupsen/logrus"
-	"github.com/go-redis/redis"
-	"github.com/gorilla/mux"
-	"github.com/nsyszr/admincenter/pkg/api"
-	"github.com/nsyszr/admincenter/pkg/middleware"
-	"github.com/streadway/amqp"
+	_ "github.com/lib/pq"
+	"github.com/nsyszr/admincenter/pkg/oam-apiserver/cmd"
 )
 
+// log "github.com/sirupsen/logrus"
+
 func main() {
-	port := 8080
+	cmd.Execute()
+
+	/*port := 8080
 
 	// log.SetFormatter(&logmatic.JSONFormatter{})
 	log.SetLevel(log.DebugLevel)
@@ -67,5 +61,6 @@ func main() {
 	// App received SIGINT signal. Shutdown now!
 	log.Info("Shutting down the server...")
 	h.Shutdown(context.Background())
-	log.Info("Server gracefully stopped")
+	log.Info("Server gracefully stopped")*/
+
 }

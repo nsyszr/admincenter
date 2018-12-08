@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	log "github.com/Sirupsen/logrus"
 	"github.com/go-redis/redis"
 	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
@@ -17,6 +16,7 @@ import (
 	redismanager "github.com/nsyszr/admincenter/pkg/controlchannel/manager/redis"
 	"github.com/nsyszr/admincenter/pkg/stats"
 	"github.com/nsyszr/admincenter/pkg/util/typeconv"
+	log "github.com/sirupsen/logrus"
 	"github.com/streadway/amqp"
 )
 

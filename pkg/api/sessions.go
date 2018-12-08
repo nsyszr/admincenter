@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	log "github.com/Sirupsen/logrus"
 	"github.com/nsyszr/admincenter/pkg/util/rand"
+	log "github.com/sirupsen/logrus"
 	"github.com/streadway/amqp"
 )
 
